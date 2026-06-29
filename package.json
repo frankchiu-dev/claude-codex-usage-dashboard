@@ -5,6 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "start:linux": "HOST=0.0.0.0 PORT=8787 node server.js",
     "setup:claude": "node setup-statusline.js",
     "setup:claude:fanout": "node setup-statusline.js --fanout"
   },
