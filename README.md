@@ -12,12 +12,14 @@ The server runs on your own Windows or macOS machine, reads local usage data, an
 
 - Shows Claude Code and Codex usage for the 5-hour and weekly windows.
 - Can display either used percentage or remaining percentage.
+- Optionally shows Antigravity quota usage percentages when the local Antigravity CLI gRPC server is running.
+- Optionally runs as a frameless always-on-top Electron desktop floating window on Windows.
 - Reads Claude Code usage through a local `statusLine` cache.
 - Reads Codex usage from the newest local `~/.codex/sessions` `rate_limits` snapshot.
 - Works on a phone or tablet connected to the same Wi-Fi network.
 - Tap the dashboard to refresh and request fullscreen mode.
 - Turns red when usage reaches the alert threshold.
-- Uses only Node.js built-in modules. No npm dependencies.
+- The server uses only Node.js built-in modules. Electron is an optional desktop-mode development dependency.
 - Includes helper scripts for Windows and macOS.
 - Includes a server-rendered KOBO / e-ink page for older browsers.
 
@@ -68,6 +70,34 @@ Device: http://192.168.1.23:8787
 
 Open `http://localhost:8787` on the computer running the server. To use a phone or tablet, connect it to the same Wi-Fi network and open the `Device` URL.
 
+## Optional Windows Desktop Floating Mode
+
+Install npm dependencies, then start the Electron wrapper:
+
+```powershell
+npm install
+npm run start:desktop
+```
+
+Or use the batch launcher:
+
+```powershell
+.\start-dashboard-desktop.bat
+```
+
+The desktop wrapper starts the local server if needed and opens `http://127.0.0.1:8787/desktop` in a frameless always-on-top floating window. The default `npm start` command still starts the original web/LAN server.
+
+Install Windows startup and desktop shortcuts for the floating mode:
+
+```powershell
+.\install-desktop-autostart.bat
+```
+
+Remove them:
+
+```powershell
+.\uninstall-desktop-autostart.bat
+```
 ## KOBO / E-ink Mode
 
 Many KOBO browsers are old and do not reliably support modern JavaScript features such as `fetch`, `async/await`, wake lock, or modern CSS. If the normal dashboard loads but the numbers never appear, use the KOBO page instead:
@@ -255,6 +285,11 @@ The macOS LaunchAgent writes logs to:
 | `CODEX_LOOKBACK_DAYS` | `14` | How many days of Codex sessions to scan |
 | `CLAUDE_USAGE_CACHE` | `~/.claude/usage-cache.json` | Claude usage cache path |
 | `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex sessions path |
+| `ANTIGRAVITY_LOG_DIR` | `~/.gemini/antigravity-cli/log` | Antigravity CLI log directory, used to discover the local gRPC port |
+| `ANTIGRAVITY_SETTINGS` | `~/.gemini/antigravity-cli/settings.json` | Antigravity CLI settings path |
+| `ANTIGRAVITY_STALE_MINUTES` | `120` | Marks Antigravity quota data as stale after this many minutes |
+| `DASHBOARD_HOST` | `127.0.0.1` | Host used by the optional Electron desktop wrapper |
+| `DASHBOARD_PORT` | `8787` | Port used by the optional Electron desktop wrapper |
 | `EXTRA_STATUSLINE_COMMAND` | empty | Extra command for fanout mode |
 
 Windows example:
@@ -298,6 +333,7 @@ Do not commit:
 - `~/.claude/usage-cache.json`
 - `~/.codex/sessions`
 - `~/.claude/settings.json`
+- `~/.gemini/antigravity-cli`
 - `config.json`
 
 ## Uploading to GitHub
