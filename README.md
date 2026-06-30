@@ -72,11 +72,27 @@ Open `http://localhost:8787` on the computer running the server. To use a phone 
 
 Many KOBO browsers are old and do not reliably support modern JavaScript features such as `fetch`, `async/await`, wake lock, or modern CSS. If the normal dashboard loads but the numbers never appear, use the KOBO page instead:
 
+Shortest URL for remaining percentage:
+
+```text
+http://YOUR-LAN-IP:8787/k
+```
+
+Shortest URL for used percentage:
+
+```text
+http://YOUR-LAN-IP:8787/u
+```
+
+These short URLs are useful on e-ink devices where typing is slow and copy/paste may not work.
+
+Long remaining URL:
+
 ```text
 http://YOUR-LAN-IP:8787/kobo
 ```
 
-`/eink` is also available as an alias.
+`/eink`, `/e`, `/r`, `/kr`, and `/ku` are also available as aliases. In short: `/k` = remaining, `/u` = used.
 
 The KOBO page is rendered on the server, so the numbers are already inside the HTML. It does not require JavaScript. It refreshes with a simple `<meta refresh>` tag.
 

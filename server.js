@@ -175,8 +175,25 @@ function getDisplayMode(requestUrl) {
     const url = new URL(requestUrl, 'http://localhost');
     const mode = String(url.searchParams.get('mode') || '').toLowerCase();
     if (mode === 'used' || mode === 'remaining') return mode;
+
+    const route = url.pathname.replace(/\/+$/, '').toLowerCase();
+    if (route === '/u' || route === '/ku') return 'used';
+    if (route === '/k' || route === '/e' || route === '/r' || route === '/kr') return 'remaining';
   } catch (error) {}
   return DISPLAY_MODE;
+}
+
+function isKoboPath(requestPath) {
+  return [
+    '/kobo', '/kobo/',
+    '/eink', '/eink/',
+    '/k', '/k/',
+    '/e', '/e/',
+    '/r', '/r/',
+    '/u', '/u/',
+    '/kr', '/kr/',
+    '/ku', '/ku/',
+  ].includes(requestPath);
 }
 
 function getDisplayedPercent(windowData, mode) {
@@ -384,7 +401,8 @@ th {
   ${koboCard('Claude', claude, mode)}
   ${koboCard('Codex', codex, mode)}
   <div class="footer">
-    <p>Generated ${generatedAt}. Open <strong>/kobo?mode=remaining</strong> or <strong>/kobo?mode=used</strong> to switch display mode.</p>
+    <p>Generated ${generatedAt}. Short URLs: <strong>/k</strong> for remaining, <strong>/u</strong> for used.</p>
+    <p>Long URLs also work: <strong>/kobo?mode=remaining</strong> and <strong>/kobo?mode=used</strong>.</p>
     <p>Marked <strong>!</strong> means used percentage is at or above ${Math.round(ALERT_PERCENT)}%.</p>
   </div>
 </div>
@@ -722,7 +740,7 @@ document.body.addEventListener('click', () => {
 const server = http.createServer((request, response) => {
   const requestPath = request.url ? request.url.split('?')[0] : '/';
 
-  if (requestPath === '/kobo' || requestPath === '/kobo/' || requestPath === '/eink' || requestPath === '/eink/') {
+  if (isKoboPath(requestPath)) {
     response.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
@@ -756,5 +774,5 @@ server.listen(PORT, HOST, () => {
   console.log('Claude / Codex usage dashboard');
   console.log('Local:  http://localhost:' + PORT);
   console.log('Device: http://' + visibleHost + ':' + PORT);
-  console.log('KOBO:   http://' + visibleHost + ':' + PORT + '/kobo?mode=remaining');
+  console.log('KOBO:   http://' + visibleHost + ':' + PORT + '/k');
 });
