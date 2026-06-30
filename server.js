@@ -1,6 +1,7 @@
 'use strict';
 
 const http = require('http');
+const http2 = require('http2');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
@@ -16,6 +17,7 @@ const PORT = envNumber('PORT', 8787);
 const ALERT_PERCENT = envNumber('ALERT_PERCENT', 85);
 const CODEX_LOOKBACK_DAYS = envNumber('CODEX_LOOKBACK_DAYS', 14);
 const KOBO_REFRESH_SECONDS = envNumber('KOBO_REFRESH_SECONDS', 60);
+const ANTIGRAVITY_STALE_MINUTES = envNumber('ANTIGRAVITY_STALE_MINUTES', 120);
 const DISPLAY_MODE = ['used', 'remaining'].includes(String(process.env.DISPLAY_MODE || '').toLowerCase())
   ? String(process.env.DISPLAY_MODE).toLowerCase()
   : 'used';
@@ -24,6 +26,10 @@ const CLAUDE_CACHE = process.env.CLAUDE_USAGE_CACHE
   || path.join(os.homedir(), '.claude', 'usage-cache.json');
 const CODEX_SESSIONS = process.env.CODEX_SESSIONS_DIR
   || path.join(os.homedir(), '.codex', 'sessions');
+const ANTIGRAVITY_LOG_DIR = process.env.ANTIGRAVITY_LOG_DIR
+  || path.join(os.homedir(), '.gemini', 'antigravity-cli', 'log');
+const ANTIGRAVITY_SETTINGS = process.env.ANTIGRAVITY_SETTINGS
+  || path.join(os.homedir(), '.gemini', 'antigravity-cli', 'settings.json');
 
 function readJson(filePath) {
   try {
@@ -153,6 +159,346 @@ function getCodexUsage() {
   codexCache = { fetchedAt: now, data };
   return data;
 }
+
+function antigravityLineTimestamp(line, fileTimeMs) {
+  const match = /^.[ ]?(\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})/.exec(line);
+  if (!match) return null;
+  const year = new Date(fileTimeMs || Date.now()).getFullYear();
+  const value = new Date(
+    year,
+    Number(match[1]) - 1,
+    Number(match[2]),
+    Number(match[3]),
+    Number(match[4]),
+    Number(match[5]),
+  ).getTime();
+  return Number.isFinite(value) ? value : null;
+}
+
+function antigravityTokenExpiry(line) {
+  const match = /token refreshed, new expiry=(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/.exec(line);
+  if (!match) return null;
+  const value = new Date(
+    Number(match[1]),
+    Number(match[2]) - 1,
+    Number(match[3]),
+    Number(match[4]),
+    Number(match[5]),
+    Number(match[6]),
+  ).getTime();
+  return Number.isFinite(value) ? value : null;
+}
+
+function readProtoVarint(buffer, offset) {
+  let value = 0n;
+  let shift = 0n;
+  let pos = offset;
+  while (pos < buffer.length) {
+    const byte = buffer[pos];
+    pos += 1;
+    value |= BigInt(byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) break;
+    shift += 7n;
+  }
+  return [Number(value), pos];
+}
+
+function parseProtoFields(buffer) {
+  const fields = [];
+  let offset = 0;
+  while (offset < buffer.length) {
+    const [tag, tagEnd] = readProtoVarint(buffer, offset);
+    offset = tagEnd;
+    const field = tag >> 3;
+    const wire = tag & 7;
+    if (!field) break;
+
+    if (wire === 0) {
+      const [value, next] = readProtoVarint(buffer, offset);
+      fields.push({ field, wire, value });
+      offset = next;
+    } else if (wire === 1) {
+      fields.push({ field, wire, value: buffer.readDoubleLE(offset) });
+      offset += 8;
+    } else if (wire === 2) {
+      const [length, next] = readProtoVarint(buffer, offset);
+      offset = next;
+      const raw = buffer.subarray(offset, offset + length);
+      fields.push({ field, wire, raw, text: raw.toString('utf8') });
+      offset += length;
+    } else if (wire === 5) {
+      fields.push({ field, wire, value: buffer.readFloatLE(offset) });
+      offset += 4;
+    } else {
+      break;
+    }
+  }
+  return fields;
+}
+
+function parseProtoTimestamp(buffer) {
+  const seconds = parseProtoFields(buffer).find((field) => field.field === 1);
+  if (!seconds || typeof seconds.value !== 'number') return null;
+  return seconds.value * 1000;
+}
+
+function grpcFramePayload(buffer) {
+  if (!buffer || buffer.length < 5) return null;
+  const length = buffer.readUInt32BE(1);
+  if (buffer.length < 5 + length) return null;
+  return buffer.subarray(5, 5 + length);
+}
+
+function antigravityLogState() {
+  const settings = readJson(ANTIGRAVITY_SETTINGS);
+  let model = settings && typeof settings.model === 'string' ? settings.model : null;
+  let modelAt = 0;
+  const grpcPorts = [];
+  let refreshAt = null;
+
+  if (fs.existsSync(ANTIGRAVITY_LOG_DIR)) {
+    let files = [];
+    try {
+      files = fs.readdirSync(ANTIGRAVITY_LOG_DIR)
+        .filter((fileName) => fileName.endsWith('.log'))
+        .map((fileName) => {
+          const filePath = path.join(ANTIGRAVITY_LOG_DIR, fileName);
+          const stat = fs.statSync(filePath);
+          return { filePath, mtimeMs: stat.mtimeMs };
+        })
+        .sort((a, b) => b.mtimeMs - a.mtimeMs)
+        .slice(0, 20);
+    } catch {
+      files = [];
+    }
+
+    for (const file of files) {
+      let lines = [];
+      try {
+        lines = fs.readFileSync(file.filePath, 'utf8').split('\n');
+      } catch {
+        continue;
+      }
+
+      for (const line of lines) {
+        if (!line) continue;
+        const timestamp = antigravityLineTimestamp(line, file.mtimeMs);
+        if (!timestamp) continue;
+
+        const portMatch = /Language server listening on .* port at (\d+) for HTTPS \(gRPC\)/.exec(line);
+        if (portMatch) {
+          grpcPorts.push({ port: Number(portMatch[1]), timestamp });
+        }
+
+        if (/quotaRefreshLoop: starting reload /.test(line) && (!refreshAt || timestamp > refreshAt)) {
+          refreshAt = timestamp;
+        }
+
+        const modelMatch = /Propagating selected model override to backend: label="([^"]+)"/.exec(line);
+        if (modelMatch && timestamp > modelAt) {
+          model = modelMatch[1];
+          modelAt = timestamp;
+        }
+      }
+    }
+  }
+
+  const seen = new Set();
+  const ports = grpcPorts
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .filter((item) => {
+      if (seen.has(item.port)) return false;
+      seen.add(item.port);
+      return true;
+    })
+    .slice(0, 8);
+
+  return {
+    model,
+    grpcPorts: ports,
+    grpcPort: ports.length ? ports[0].port : null,
+    grpcPortAt: ports.length ? ports[0].timestamp : 0,
+    refreshAt,
+  };
+}
+
+function callAntigravityQuota(port) {
+  return new Promise((resolve, reject) => {
+    const client = http2.connect(`https://127.0.0.1:${port}`, {
+      rejectUnauthorized: false,
+    });
+    const timer = setTimeout(() => {
+      client.close();
+      reject(new Error('Antigravity quota request timed out'));
+    }, 5000);
+
+    client.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+
+    const request = client.request({
+      ':method': 'POST',
+      ':path': '/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary',
+      'content-type': 'application/grpc',
+      te: 'trailers',
+    });
+    const chunks = [];
+
+    request.on('data', (chunk) => chunks.push(chunk));
+    request.on('error', (error) => {
+      clearTimeout(timer);
+      client.close();
+      reject(error);
+    });
+    request.on('end', () => {
+      clearTimeout(timer);
+      client.close();
+      const payload = grpcFramePayload(Buffer.concat(chunks));
+      if (!payload) {
+        reject(new Error('Antigravity quota response was empty'));
+        return;
+      }
+      resolve(payload);
+    });
+
+    request.end(Buffer.from([0, 0, 0, 0, 0]));
+  });
+}
+
+function parseAntigravityBucket(raw) {
+  const fields = parseProtoFields(raw);
+  const text = (field) => {
+    const match = fields.find((item) => item.field === field && item.wire === 2);
+    return match ? match.text : null;
+  };
+  const remainingField = fields.find((item) => item.field === 4 && item.wire === 5);
+  const resetField = fields.find((item) => item.field === 6 && item.wire === 2);
+  const remaining = remainingField && Number.isFinite(remainingField.value)
+    ? remainingField.value
+    : null;
+
+  return {
+    id: text(1),
+    label: text(2),
+    window: text(3),
+    remaining,
+    used: remaining === null ? null : Math.max(0, Math.min(100, (1 - remaining) * 100)),
+    resetAt: resetField ? parseProtoTimestamp(resetField.raw) : null,
+  };
+}
+
+function parseAntigravityQuotaPayload(payload) {
+  const wrapper = parseProtoFields(payload).find((field) => field.field === 1 && field.wire === 2);
+  const response = wrapper ? wrapper.raw : payload;
+  const fields = parseProtoFields(response);
+  const groups = fields
+    .filter((field) => field.field === 2 && field.wire === 2)
+    .map((field) => {
+      const groupFields = parseProtoFields(field.raw);
+      const buckets = groupFields
+        .filter((item) => item.field === 1 && item.wire === 2)
+        .map((item) => parseAntigravityBucket(item.raw));
+      const labelField = groupFields.find((item) => item.field === 2 && item.wire === 2);
+      const label = labelField ? labelField.text : 'Antigravity';
+      const five = buckets.find((bucket) => bucket.window === '5h' || /-5h$/.test(bucket.id || '')) || null;
+      const weekly = buckets.find((bucket) => bucket.window === 'weekly' || /weekly/.test(bucket.id || '')) || null;
+      return { label, buckets, five, seven: weekly };
+    });
+
+  return groups;
+}
+
+function chooseAntigravityGroup(groups, model) {
+  if (!groups.length) return null;
+  if (/claude|gpt|opus|sonnet|3p/i.test(model || '')) {
+    return groups.find((group) => /claude|gpt|3p/i.test(group.label)) || groups[0];
+  }
+  if (/gemini/i.test(model || '')) {
+    return groups.find((group) => /gemini/i.test(group.label)) || groups[0];
+  }
+  return groups[0];
+}
+
+async function readAntigravityUsage() {
+  const state = antigravityLogState();
+  const staleAfterMs = ANTIGRAVITY_STALE_MINUTES * 60000;
+  if (!state.grpcPorts || !state.grpcPorts.length) {
+    return {
+      fetchedAt: state.refreshAt || null,
+      five: null,
+      seven: null,
+      groups: [],
+      model: state.model,
+      activeLabel: null,
+      source: 'antigravity-grpc',
+      stale: true,
+      staleAfterMs,
+      error: 'Antigravity CLI gRPC port not found',
+    };
+  }
+
+  let payload = null;
+  let lastError = null;
+  for (const candidate of state.grpcPorts) {
+    try {
+      payload = await callAntigravityQuota(candidate.port);
+      break;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!payload) {
+    throw lastError || new Error('Antigravity quota gRPC request failed');
+  }
+  const groups = parseAntigravityQuotaPayload(payload);
+  const active = chooseAntigravityGroup(groups, state.model);
+  const other = groups.find((group) => group !== active) || null;
+
+  return {
+    fetchedAt: Date.now(),
+    five: active ? active.five : null,
+    seven: active ? active.seven : null,
+    groups,
+    model: state.model,
+    activeLabel: active ? active.label : null,
+    other: other ? { label: other.label, five: other.five, seven: other.seven } : null,
+    source: 'antigravity-grpc',
+    stale: false,
+    staleAfterMs,
+  };
+}
+
+let antigravityCache = { fetchedAt: 0, data: null, promise: null };
+
+async function getAntigravityUsage() {
+  const now = Date.now();
+  if (antigravityCache.data && now - antigravityCache.fetchedAt < 15000) {
+    return antigravityCache.data;
+  }
+  if (antigravityCache.promise) return antigravityCache.promise;
+
+  antigravityCache.promise = readAntigravityUsage()
+    .catch((error) => ({
+      fetchedAt: null,
+      five: null,
+      seven: null,
+      groups: [],
+      model: null,
+      activeLabel: null,
+      other: null,
+      source: 'antigravity-grpc',
+      stale: true,
+      staleAfterMs: ANTIGRAVITY_STALE_MINUTES * 60000,
+      error: error.message,
+    }))
+    .then((data) => {
+      antigravityCache = { fetchedAt: Date.now(), data, promise: null };
+      return data;
+    });
+  return antigravityCache.promise;
+}
+
 
 function getLanAddress() {
   const networks = os.networkInterfaces();
@@ -409,6 +755,613 @@ th {
 </body>
 </html>`;
 }
+
+function desktopPageHtml() {
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#0e1013">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<title>Usage Watch</title>
+<style>
+:root {
+  --watch-w: 356px;
+  --watch-h: 416px;
+  --ink: #f5f2ea;
+  --muted: #a6a094;
+  --quiet: #6e706e;
+  --metal: #17191b;
+  --metal-2: #0e1012;
+  --rim: rgba(245, 242, 234, 0.16);
+  --track: rgba(245, 242, 234, 0.09);
+  --claude: #f2ad63;
+  --codex: #63d4c7;
+  --antigravity: #b9d86f;
+  --alert: #f06e5d;
+  --shadow: 0 22px 50px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.11);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 12%, rgba(242, 173, 99, 0.16), transparent 28%),
+    radial-gradient(circle at 12% 86%, rgba(99, 212, 199, 0.12), transparent 28%),
+    #0f1114;
+  color: var(--ink);
+  font-family: "Outfit", "Segoe UI", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.22;
+  background-image:
+    linear-gradient(rgba(255,255,255,0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
+  background-size: 12px 12px;
+  mask-image: radial-gradient(circle at center, black, transparent 72%);
+}
+
+.watch {
+  position: relative;
+  width: min(var(--watch-w), calc(100vw - 12px));
+  min-height: min(var(--watch-h), calc(100vh - 12px));
+  padding: 15px;
+  border-radius: 42px;
+  overflow: hidden;
+  background:
+    linear-gradient(155deg, rgba(255,255,255,0.11), rgba(255,255,255,0.025) 32%, rgba(255,255,255,0.075) 100%),
+    radial-gradient(circle at 50% 0%, rgba(255,255,255,0.12), transparent 35%),
+    linear-gradient(180deg, var(--metal), var(--metal-2));
+  border: 1px solid var(--rim);
+  box-shadow: var(--shadow);
+  touch-action: none;
+  -webkit-app-region: no-drag;
+  animation: rise 260ms ease-out both;
+  opacity: 0.96;
+}
+
+.watch::after {
+  content: "";
+  position: absolute;
+  inset: 9px;
+  border-radius: 34px;
+  pointer-events: none;
+  border: 1px solid rgba(255,255,255,0.07);
+  box-shadow: inset 0 0 24px rgba(0,0,0,0.38);
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.topbar,
+.readouts,
+.status,
+button {
+  -webkit-app-region: no-drag;
+}
+
+.topbar {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 13px;
+  background: rgba(255,255,255,0.075);
+  border: 1px solid rgba(255,255,255,0.09);
+  color: var(--ink);
+  font-weight: 800;
+  font-size: 13px;
+}
+
+.title {
+  min-width: 0;
+}
+
+.title strong {
+  display: block;
+  font-size: 15px;
+  line-height: 1.05;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.title span,
+.status {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.icon-btn {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: 13px;
+  background: rgba(255,255,255,0.07);
+  color: var(--ink);
+  cursor: pointer;
+  transition: transform 160ms ease, background 160ms ease, border-color 160ms ease;
+}
+
+.icon-btn:hover {
+  background: rgba(255,255,255,0.12);
+  border-color: rgba(242, 173, 99, 0.38);
+}
+
+.icon-btn:active {
+  transform: translateY(1px) scale(0.97);
+}
+
+.readouts {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.readout {
+  min-width: 0;
+  min-height: 176px;
+  padding: 14px;
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255,255,255,0.095), transparent 58%),
+    rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.075);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+.readout.antigravity-card {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 0.88fr 1.12fr;
+  gap: 12px;
+  min-height: 92px;
+}
+
+.readout.antigravity-card .readout-head {
+  margin-bottom: 0;
+}
+
+.readout.antigravity-card strong {
+  font-size: 32px;
+}
+
+.readout.antigravity-card .detail {
+  align-content: center;
+  gap: 10px;
+}
+
+.readout.antigravity-card .detail-row {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.readout.antigravity-card .detail-row:first-child {
+  font-size: 12px;
+}
+
+.readout.antigravity-card .detail-row span:last-child {
+  font-size: 12px;
+}
+
+.readout.antigravity-card .detail-row .metric-pair {
+  color: var(--ink);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+}
+
+.readout-head {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 13px;
+}
+
+.service {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+
+.readout strong {
+  color: var(--ink);
+  font-family: "JetBrains Mono", Consolas, monospace;
+  font-size: 42px;
+  line-height: 1;
+}
+
+.readout small {
+  color: var(--quiet);
+  font-size: 15px;
+}
+
+.detail {
+  display: grid;
+  gap: 9px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.32;
+}
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.detail-row:first-child {
+  font-size: 15px;
+  line-height: 1.18;
+  font-weight: 700;
+}
+
+.detail-row span:last-child {
+  color: #cec8bc;
+  text-align: right;
+  font-weight: 600;
+}
+
+.detail-row:first-child span:last-child {
+  color: var(--ink);
+}
+
+.detail-row:first-child b {
+  font-size: 1.08em;
+}
+
+.status {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 12px 2px 0;
+  font-size: 11px;
+}
+
+.claude {
+  color: var(--claude);
+}
+
+.codex {
+  color: var(--codex);
+}
+
+.antigravity {
+  color: var(--antigravity);
+}
+
+html.desktop-shell,
+body.desktop-shell {
+  background: transparent;
+}
+
+body.desktop-shell::before {
+  display: none;
+}
+
+body.desktop-shell {
+  display: block;
+}
+
+body.desktop-shell .watch {
+  width: calc(100vw - 8px);
+  min-height: calc(100vh - 8px);
+  margin: 4px;
+}
+
+@media (max-width: 370px), (max-height: 410px) {
+  :root {
+    --watch-w: 332px;
+    --watch-h: 296px;
+  }
+
+  .watch {
+    padding: 13px;
+    border-radius: 36px;
+  }
+
+  .readout {
+    min-height: 170px;
+    padding: 13px;
+  }
+
+  .readout.antigravity-card {
+    min-height: 92px;
+  }
+
+  .readout strong {
+    font-size: 38px;
+  }
+
+  .detail {
+    font-size: 12.5px;
+  }
+}
+</style>
+</head>
+<body>
+  <main class="watch" aria-label="Claude and Codex usage watch face">
+    <header class="topbar">
+      <div class="mark">CC</div>
+      <div class="title">
+        <strong>Usage cockpit</strong>
+        <span>Claude / Codex</span>
+      </div>
+      <button class="icon-btn" id="refreshBtn" type="button" title="Refresh" aria-label="Refresh">↻</button>
+    </header>
+
+    <section class="readouts">
+      <article class="readout" aria-label="Claude usage">
+        <div class="readout-head">
+          <span class="service claude"><i class="dot"></i>Claude</span>
+          <strong><span id="num_claude_five">--</span><small>%</small></strong>
+        </div>
+        <div class="detail">
+          <div class="detail-row"><span>7d</span><span><b id="num_claude_seven">--</b>%</span></div>
+          <div class="detail-row"><span>reset</span><span id="reset_claude_five">no data</span></div>
+          <div class="detail-row"><span>age</span><span id="age_claude">no data</span></div>
+        </div>
+      </article>
+
+      <article class="readout" aria-label="Codex usage">
+        <div class="readout-head">
+          <span class="service codex"><i class="dot"></i>Codex</span>
+          <strong><span id="num_codex_five">--</span><small>%</small></strong>
+        </div>
+        <div class="detail">
+          <div class="detail-row"><span>7d</span><span><b id="num_codex_seven">--</b>%</span></div>
+          <div class="detail-row"><span>reset</span><span id="reset_codex_five">no data</span></div>
+          <div class="detail-row"><span>age</span><span id="age_codex">no data</span></div>
+        </div>
+      </article>
+
+      <article class="readout antigravity-card" aria-label="Antigravity quota refresh">
+        <div class="readout-head">
+          <span class="service antigravity"><i class="dot"></i>Antigravity</span>
+          <strong><span id="num_antigravity_age">--</span><small id="unit_antigravity_age"></small></strong>
+        </div>
+        <div class="detail">
+          <div class="detail-row"><span>group</span><span id="model_antigravity">unknown</span></div>
+          <div class="detail-row"><span>other</span><span id="auth_antigravity">unknown</span></div>
+        </div>
+      </article>
+    </section>
+
+    <footer class="status">
+      <span id="global_status">syncing</span>
+      <span>right click for menu</span>
+    </footer>
+  </main>
+
+<script>
+const COLORS = {
+  claude: '#f2ad63',
+  codex: '#63d4c7',
+  antigravity: '#b9d86f',
+  alert: '#f06e5d',
+  muted: '#8d877c',
+};
+const ALERT_PERCENT = ${JSON.stringify(ALERT_PERCENT)};
+const params = new URLSearchParams(window.location.search);
+const isDesktopShell = params.get('mode') === 'desktop' || /\\bElectron\\//.test(navigator.userAgent);
+if (isDesktopShell) {
+  document.documentElement.classList.add('desktop-shell');
+  document.body.classList.add('desktop-shell');
+}
+const $ = (id) => document.getElementById(id);
+
+function percentValue(data) {
+  return data && typeof data.used === 'number' ? Math.round(data.used) : null;
+}
+
+function resetText(timestamp) {
+  if (!timestamp) return 'no data';
+  const seconds = Math.floor((timestamp - Date.now()) / 1000);
+  if (seconds <= 0) return 'reset';
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return days + 'd ' + hours + 'h';
+  if (hours > 0) return hours + 'h ' + minutes + 'm';
+  return Math.max(0, minutes) + 'm';
+}
+
+function ageText(timestamp) {
+  if (!timestamp) return 'no data';
+  const seconds = Math.floor((Date.now() - timestamp) / 1000);
+  if (seconds < 60) return 'now';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm';
+  if (seconds < 86400) return Math.floor(seconds / 3600) + 'h';
+  return Math.floor(seconds / 86400) + 'd';
+}
+
+function compactAgeParts(timestamp) {
+  if (!timestamp) return { value: '--', unit: '' };
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return { value: 'now', unit: '' };
+  if (seconds < 3600) return { value: String(Math.floor(seconds / 60)), unit: 'm' };
+  if (seconds < 86400) return { value: String(Math.floor(seconds / 3600)), unit: 'h' };
+  return { value: String(Math.floor(seconds / 86400)), unit: 'd' };
+}
+
+function shortTime(timestamp) {
+  if (!timestamp) return 'no data';
+  return new Date(timestamp).toLocaleTimeString('en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
+function sourceAgeText(timestamp, stale) {
+  const age = ageText(timestamp);
+  if (stale && timestamp) return 'stale ' + age;
+  return age;
+}
+
+function setText(id, value) {
+  const el = $(id);
+  if (el) el.textContent = value;
+}
+
+function setService(name, data) {
+  const five = percentValue(data && data.five);
+  const seven = percentValue(data && data.seven);
+  setText('num_' + name + '_five', five === null ? '--' : String(five));
+  setText('num_' + name + '_seven', seven === null ? '--' : String(seven));
+  setText('reset_' + name + '_five', resetText(data && data.five && data.five.resetAt));
+  setText('age_' + name, sourceAgeText(data && data.fetchedAt, data && data.stale));
+  return five;
+}
+
+function setAntigravity(data) {
+  const five = percentValue(data && data.five);
+  const seven = percentValue(data && data.seven);
+  const otherFive = percentValue(data && data.other && data.other.five);
+  const otherSeven = percentValue(data && data.other && data.other.seven);
+  setText('num_antigravity_age', five === null && seven === null ? '--' : (five === null ? '--' : String(five)) + '%/' + (seven === null ? '--' : String(seven)));
+  setText('unit_antigravity_age', five === null && seven === null ? '' : '%');
+  setText('model_antigravity', data && data.activeLabel ? data.activeLabel : (data && data.model ? data.model : 'unknown'));
+  const otherEl = $('auth_antigravity');
+  if (!otherEl) return;
+  if (data && data.other) {
+    otherEl.innerHTML = '';
+    otherEl.append(document.createTextNode(data.other.label + ' '));
+    const metric = document.createElement('b');
+    metric.className = 'metric-pair';
+    metric.textContent = (otherFive === null ? '--' : String(otherFive)) + '/' + (otherSeven === null ? '--' : String(otherSeven)) + '%';
+    otherEl.append(metric);
+  } else {
+    otherEl.textContent = data && data.error ? data.error : 'no data';
+  }
+}
+
+function setOffline() {
+  setService('claude', {});
+  setService('codex', {});
+  setAntigravity({});
+  setText('global_status', 'disconnected');
+}
+
+function installDesktopDrag() {
+  if (!isDesktopShell || !window.desktopHud) return;
+  const watch = document.querySelector('.watch');
+  if (!watch) return;
+  let dragging = false;
+  let pointerId = null;
+
+  const stop = () => {
+    if (!dragging) return;
+    dragging = false;
+    pointerId = null;
+    window.desktopHud.endDrag();
+  };
+
+  watch.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || event.target.closest('button')) return;
+    dragging = true;
+    pointerId = event.pointerId;
+    watch.setPointerCapture(pointerId);
+    window.desktopHud.beginDrag(event.screenX, event.screenY);
+    event.preventDefault();
+  });
+
+  watch.addEventListener('pointermove', (event) => {
+    if (!dragging || event.pointerId !== pointerId) return;
+    window.desktopHud.dragTo(event.screenX, event.screenY);
+  });
+
+  watch.addEventListener('pointerup', stop);
+  watch.addEventListener('pointercancel', stop);
+  window.addEventListener('blur', stop);
+}
+
+async function refreshUsage() {
+  try {
+    const response = await fetch('/api/usage', { cache: 'no-store' });
+    const usage = await response.json();
+    setService('claude', usage.claude || {});
+    setService('codex', usage.codex || {});
+    setAntigravity(usage.antigravity || {});
+    setText('global_status', 'updated ' + new Date().toLocaleTimeString('en-US', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }));
+  } catch (error) {
+    setOffline();
+  }
+}
+
+function init() {
+  installDesktopDrag();
+  $('refreshBtn').addEventListener('click', refreshUsage);
+  refreshUsage();
+  setInterval(refreshUsage, 2000);
+}
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') refreshUsage();
+});
+
+init();
+</script>
+</body>
+</html>`;
+}
+
 
 function pageHtml() {
   return `<!doctype html>
@@ -737,19 +1690,20 @@ document.body.addEventListener('click', () => {
 </html>`;
 }
 
-const server = http.createServer((request, response) => {
-  const requestPath = request.url ? request.url.split('?')[0] : '/';
+const server = http.createServer(async (request, response) => {
+  const requestUrl = new URL(request.url || '/', `http://${request.headers.host || '127.0.0.1'}`);
+  const requestPath = requestUrl.pathname;
 
   if (isKoboPath(requestPath)) {
     response.writeHead(200, {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
     });
-    response.end(koboPageHtml(request.url));
+    response.end(koboPageHtml(request.url || '/'));
     return;
   }
 
-  if (request.url === '/api/usage') {
+  if (requestPath === '/api/usage') {
     response.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
       'Cache-Control': 'no-store',
@@ -758,7 +1712,17 @@ const server = http.createServer((request, response) => {
       displayMode: DISPLAY_MODE,
       claude: readClaudeUsage(),
       codex: getCodexUsage(),
+      antigravity: await getAntigravityUsage(),
     }));
+    return;
+  }
+
+  if (requestPath === '/desktop') {
+    response.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    response.end(desktopPageHtml());
     return;
   }
 
@@ -772,7 +1736,8 @@ const server = http.createServer((request, response) => {
 server.listen(PORT, HOST, () => {
   const visibleHost = HOST === '0.0.0.0' ? getLanAddress() : HOST;
   console.log('Claude / Codex usage dashboard');
-  console.log('Local:  http://localhost:' + PORT);
-  console.log('Device: http://' + visibleHost + ':' + PORT);
-  console.log('KOBO:   http://' + visibleHost + ':' + PORT + '/k');
+  console.log('Local:   http://localhost:' + PORT);
+  console.log('Device:  http://' + visibleHost + ':' + PORT);
+  console.log('Desktop: http://localhost:' + PORT + '/desktop');
+  console.log('KOBO:    http://' + visibleHost + ':' + PORT + '/k');
 });
