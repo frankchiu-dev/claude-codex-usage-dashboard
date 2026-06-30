@@ -15,6 +15,7 @@ function envNumber(name, fallback) {
 const PORT = envNumber('PORT', 8787);
 const ALERT_PERCENT = envNumber('ALERT_PERCENT', 85);
 const CODEX_LOOKBACK_DAYS = envNumber('CODEX_LOOKBACK_DAYS', 14);
+const KOBO_REFRESH_SECONDS = envNumber('KOBO_REFRESH_SECONDS', 60);
 const DISPLAY_MODE = ['used', 'remaining'].includes(String(process.env.DISPLAY_MODE || '').toLowerCase())
   ? String(process.env.DISPLAY_MODE).toLowerCase()
   : 'used';
@@ -163,6 +164,232 @@ function getLanAddress() {
     }
   }
   return 'localhost';
+}
+
+function clampPercent(value) {
+  return Math.max(0, Math.min(100, value));
+}
+
+function getDisplayMode(requestUrl) {
+  try {
+    const url = new URL(requestUrl, 'http://localhost');
+    const mode = String(url.searchParams.get('mode') || '').toLowerCase();
+    if (mode === 'used' || mode === 'remaining') return mode;
+  } catch (error) {}
+  return DISPLAY_MODE;
+}
+
+function getDisplayedPercent(windowData, mode) {
+  if (!windowData || typeof windowData.used !== 'number') return null;
+  return mode === 'remaining'
+    ? clampPercent(100 - windowData.used)
+    : clampPercent(windowData.used);
+}
+
+function formatPercent(windowData, mode) {
+  const value = getDisplayedPercent(windowData, mode);
+  return value === null ? '--' : String(Math.round(value)) + '%';
+}
+
+function formatModeLabel(mode) {
+  return mode === 'remaining' ? 'remaining' : 'used';
+}
+
+function formatAge(timestamp) {
+  if (!timestamp) return 'no data';
+  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  if (seconds < 60) return 'updated now';
+  if (seconds < 3600) return 'updated ' + Math.floor(seconds / 60) + 'm ago';
+  if (seconds < 86400) return 'updated ' + Math.floor(seconds / 3600) + 'h ago';
+  return 'updated ' + Math.floor(seconds / 86400) + 'd ago';
+}
+
+function formatReset(timestamp) {
+  if (!timestamp) return '';
+  const seconds = Math.floor((timestamp - Date.now()) / 1000);
+  if (seconds <= 0) return 'reset';
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return 'reset ' + days + 'd ' + hours + 'h';
+  if (hours > 0) return 'reset ' + hours + 'h ' + minutes + 'm';
+  return 'reset ' + Math.max(0, minutes) + 'm';
+}
+
+function koboBar(windowData, mode) {
+  const value = getDisplayedPercent(windowData, mode);
+  const width = value === null ? 0 : Math.max(2, Math.round(value));
+  return '<div class="bar"><div class="fill" style="width:' + width + '%"></div></div>';
+}
+
+function koboMetric(label, windowData, mode) {
+  const alert = windowData && typeof windowData.used === 'number' && windowData.used >= ALERT_PERCENT;
+  return '<tr class="' + (alert ? 'alert' : '') + '">'
+    + '<th>' + label + '</th>'
+    + '<td class="num">' + formatPercent(windowData, mode) + '</td>'
+    + '<td class="reset">' + formatReset(windowData && windowData.resetAt) + '</td>'
+    + '<td class="mark">' + (alert ? '!' : '') + '</td>'
+    + '</tr><tr class="barrow"><td colspan="4">' + koboBar(windowData, mode) + '</td></tr>';
+}
+
+function koboCard(name, usage, mode) {
+  return '<section class="card">'
+    + '<div class="head">'
+    + '<h2>' + name + '</h2>'
+    + '<p>' + formatAge(usage.fetchedAt) + '</p>'
+    + '</div>'
+    + '<table>'
+    + '<tbody>'
+    + koboMetric('5 hours', usage.five, mode)
+    + koboMetric('weekly', usage.seven, mode)
+    + '</tbody>'
+    + '</table>'
+    + '</section>';
+}
+
+function koboPageHtml(requestUrl) {
+  const mode = getDisplayMode(requestUrl);
+  const claude = readClaudeUsage();
+  const codex = getCodexUsage();
+  const generatedAt = new Date().toLocaleString('en-US', { hour12: false });
+
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="${Math.max(15, Math.round(KOBO_REFRESH_SECONDS))}">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Usage - KOBO</title>
+<style>
+html, body {
+  margin: 0;
+  padding: 0;
+  background: #fff;
+  color: #000;
+  font-family: Georgia, "Times New Roman", serif;
+}
+body {
+  padding: 18px 16px;
+}
+.top {
+  border-bottom: 3px solid #000;
+  margin-bottom: 18px;
+  padding-bottom: 10px;
+}
+h1 {
+  font-size: 28px;
+  line-height: 1;
+  margin: 0 0 8px 0;
+  letter-spacing: 0;
+}
+.sub {
+  font-size: 14px;
+  line-height: 1.3;
+  margin: 0;
+}
+.card {
+  border: 2px solid #000;
+  margin: 0 0 18px 0;
+  padding: 12px 10px 8px 10px;
+  page-break-inside: avoid;
+}
+.head {
+  border-bottom: 1px solid #000;
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+}
+h2 {
+  font-size: 28px;
+  line-height: 1;
+  margin: 0 0 5px 0;
+  text-transform: uppercase;
+}
+p {
+  margin: 0;
+}
+.head p {
+  font-size: 13px;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th, td {
+  padding: 4px 0;
+  vertical-align: baseline;
+}
+th {
+  width: 36%;
+  font-size: 17px;
+  text-align: left;
+  text-transform: uppercase;
+}
+.num {
+  width: 30%;
+  font-size: 36px;
+  font-weight: bold;
+  text-align: right;
+}
+.reset {
+  width: 28%;
+  font-size: 13px;
+  text-align: right;
+}
+.mark {
+  width: 6%;
+  font-size: 30px;
+  font-weight: bold;
+  text-align: right;
+}
+.barrow td {
+  padding: 0 0 12px 0;
+}
+.bar {
+  width: 100%;
+  height: 14px;
+  border: 1px solid #000;
+  background: #fff;
+}
+.fill {
+  height: 14px;
+  background: #000;
+}
+.alert .num,
+.alert .mark {
+  color: #000;
+}
+.footer {
+  border-top: 1px solid #000;
+  padding-top: 8px;
+  font-size: 12px;
+  line-height: 1.25;
+}
+@media (min-width: 760px) {
+  body {
+    padding: 24px;
+  }
+  .wrap {
+    width: 720px;
+    margin: 0 auto;
+  }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>AI Usage</h1>
+    <p class="sub">KOBO / e-ink mode - showing ${formatModeLabel(mode)} - refresh ${Math.max(15, Math.round(KOBO_REFRESH_SECONDS))}s</p>
+  </div>
+  ${koboCard('Claude', claude, mode)}
+  ${koboCard('Codex', codex, mode)}
+  <div class="footer">
+    <p>Generated ${generatedAt}. Open <strong>/kobo?mode=remaining</strong> or <strong>/kobo?mode=used</strong> to switch display mode.</p>
+    <p>Marked <strong>!</strong> means used percentage is at or above ${Math.round(ALERT_PERCENT)}%.</p>
+  </div>
+</div>
+</body>
+</html>`;
 }
 
 function pageHtml() {
@@ -493,6 +720,17 @@ document.body.addEventListener('click', () => {
 }
 
 const server = http.createServer((request, response) => {
+  const requestPath = request.url ? request.url.split('?')[0] : '/';
+
+  if (requestPath === '/kobo' || requestPath === '/kobo/' || requestPath === '/eink' || requestPath === '/eink/') {
+    response.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    response.end(koboPageHtml(request.url));
+    return;
+  }
+
   if (request.url === '/api/usage') {
     response.writeHead(200, {
       'Content-Type': 'application/json; charset=utf-8',
@@ -518,4 +756,5 @@ server.listen(PORT, HOST, () => {
   console.log('Claude / Codex usage dashboard');
   console.log('Local:  http://localhost:' + PORT);
   console.log('Device: http://' + visibleHost + ':' + PORT);
+  console.log('KOBO:   http://' + visibleHost + ':' + PORT + '/kobo?mode=remaining');
 });

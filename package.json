@@ -1,6 +1,6 @@
 {
   "name": "claude-codex-usage-dashboard",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A local Windows and macOS dashboard for Claude Code and Codex usage limits.",
   "main": "server.js",
   "scripts": {

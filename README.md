@@ -19,6 +19,7 @@ The server runs on your own Windows or macOS machine, reads local usage data, an
 - Turns red when usage reaches the alert threshold.
 - Uses only Node.js built-in modules. No npm dependencies.
 - Includes helper scripts for Windows and macOS.
+- Includes a server-rendered KOBO / e-ink page for older browsers.
 
 ## Important Limitations
 
@@ -66,6 +67,32 @@ Device: http://192.168.1.23:8787
 ```
 
 Open `http://localhost:8787` on the computer running the server. To use a phone or tablet, connect it to the same Wi-Fi network and open the `Device` URL.
+
+## KOBO / E-ink Mode
+
+Many KOBO browsers are old and do not reliably support modern JavaScript features such as `fetch`, `async/await`, wake lock, or modern CSS. If the normal dashboard loads but the numbers never appear, use the KOBO page instead:
+
+```text
+http://YOUR-LAN-IP:8787/kobo
+```
+
+`/eink` is also available as an alias.
+
+The KOBO page is rendered on the server, so the numbers are already inside the HTML. It does not require JavaScript. It refreshes with a simple `<meta refresh>` tag.
+
+Display remaining percentage:
+
+```text
+http://YOUR-LAN-IP:8787/kobo?mode=remaining
+```
+
+Display used percentage:
+
+```text
+http://YOUR-LAN-IP:8787/kobo?mode=used
+```
+
+KOBO browsers also may not rotate web pages reliably. The `/kobo` page is designed for portrait reading mode instead of relying on landscape rotation.
 
 ## Start Scripts
 
@@ -208,6 +235,7 @@ The macOS LaunchAgent writes logs to:
 | `HOST` | `0.0.0.0` | Allows devices on the same Wi-Fi to connect. Use `127.0.0.1` for local-only preview |
 | `ALERT_PERCENT` | `85` | Usage percentage that turns the dashboard red |
 | `DISPLAY_MODE` | `used` | Display `used` percentage or `remaining` percentage |
+| `KOBO_REFRESH_SECONDS` | `60` | Refresh interval for `/kobo`; minimum rendered value is 15 seconds |
 | `CODEX_LOOKBACK_DAYS` | `14` | How many days of Codex sessions to scan |
 | `CLAUDE_USAGE_CACHE` | `~/.claude/usage-cache.json` | Claude usage cache path |
 | `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex sessions path |
@@ -219,13 +247,14 @@ Windows example:
 $env:PORT="8790"
 $env:HOST="127.0.0.1"
 $env:DISPLAY_MODE="remaining"
+$env:KOBO_REFRESH_SECONDS="120"
 node server.js
 ```
 
 macOS example:
 
 ```bash
-PORT=8790 HOST=127.0.0.1 DISPLAY_MODE=remaining node server.js
+PORT=8790 HOST=127.0.0.1 DISPLAY_MODE=remaining KOBO_REFRESH_SECONDS=120 node server.js
 ```
 
 `DISPLAY_MODE=used` shows how much of the limit has been used. `DISPLAY_MODE=remaining` shows how much is left. The red alert color is still based on used percentage reaching `ALERT_PERCENT`.
