@@ -1,40 +1,23 @@
 # Security Policy
 
-This dashboard is intended for trusted local networks only.
+## Data and credentials
 
-## What the server reads
+The dashboard reads the configured Claude status-line cache and Codex session logs locally. It renders only quota percentages, source timestamps, and reset times. Compact history contains those fields and capture timestamps. It does not read OAuth credentials, forward raw session records, or make outbound requests.
 
-- Claude usage cache: `~/.claude/usage-cache.json`
-- Codex session logs: `~/.codex/sessions/**/rollout-*.jsonl`
+Do not commit config.json, history.jsonl, provider caches, session logs, settings files, tokens, pairing links, or screenshots exposing private details. Store the data directory and config with permissions appropriate for your local account.
 
-The dashboard does not upload these files anywhere. It only renders a local web page and a local JSON API.
+## Local and network access
 
-## What not to commit
+Default binding is 127.0.0.1. LAN sharing must be explicitly enabled with --lan or HOST. LAN and PUBLIC_URL modes require pairing for dashboard pages and data APIs. A random pairing key is generated on startup unless PAIRING_KEY is configured. Restart with a new key to revoke all existing sessions. Session cookies are HttpOnly, SameSite=Strict, and expire after 30 days. Configuring an HTTPS PUBLIC_URL also makes cookies Secure.
 
-Do not commit:
+The pairing key/link is a bearer secret. Anyone with it and network access can pair. It can appear in terminal output, startup logs, QR screenshots, browser history, or a reverse proxy's query logs. Keep those private, avoid logging /pair query strings, and rotate the key if exposed. The app sets no-store and no-referrer headers and redirects to / after pairing to remove the key from the current address bar.
 
-- `~/.claude/usage-cache.json`
-- `~/.codex/sessions`
-- `~/.claude/settings.json`
-- `config.json`
-- screenshots that expose account, path, workspace, or session details
+Plain LAN HTTP is intended for trusted private networks; it does not encrypt cookies or traffic. Use an authenticated HTTPS reverse proxy such as Tailscale Serve or Cloudflare Tunnel with Access for remote access. Do not forward the HTTP port directly to the public internet.
 
-## Network exposure
+The Host header must match a local interface or the exact configured PUBLIC_URL host. The app does not trust forwarded headers to decide access or cookie security. POST requests with a foreign Origin are rejected. Origin checks supplement pairing; they are not authentication. The unauthenticated /healthz returns only an ok flag. No endpoint can invoke a model, renew credentials, modify provider settings, or read an arbitrary file path.
 
-By default, `server.js` listens on `0.0.0.0` so a phone or tablet on the same Wi-Fi can open it.
-
-Do not expose this port to the public internet. If you only want local preview, run:
-
-```bash
-HOST=127.0.0.1 node server.js
-```
-
-On Windows PowerShell:
-
-```powershell
-$env:HOST="127.0.0.1"; node server.js
-```
+Fanout commands are explicitly configured local shell commands. Only install commands that you trust.
 
 ## Reporting issues
 
-If you find a security issue, please open a private advisory or contact the maintainer directly instead of posting sensitive details in a public issue.
+Use a private GitHub security advisory or contact the maintainer for security issues. Do not include credentials or private provider records in public issues.

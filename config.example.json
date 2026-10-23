@@ -1,3 +1,9 @@
 {
+  "HOST": "127.0.0.1",
+  "PORT": 8787,
+  "DISPLAY_MODE": "used",
+  "HISTORY_DAYS": 30,
+  "STALE_MINUTES": 120,
+  "PUBLIC_URL": "",
   "extraStatuslineCommand": ""
 }

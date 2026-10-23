@@ -1,301 +1,174 @@
 # Claude / Codex Usage Dashboard
 
-An unofficial local dashboard for viewing Claude Code and Codex usage limits on a spare phone, tablet, or small screen.
-
-The server runs on your own Windows or macOS machine, reads local usage data, and serves a simple dashboard that can be opened from another device on the same Wi-Fi network.
+View Claude Code and Codex usage on your computer, phone, tablet, or KOBO. The dashboard runs on your own Windows or macOS computer. Cloudflare, a domain name, and a hosted server are optional.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-767FC6)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-43853D)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-## Features
+## Start on this computer
 
-- Shows Claude Code and Codex usage for the 5-hour and weekly windows.
-- Can display either used percentage or remaining percentage.
-- Reads Claude Code usage through a local `statusLine` cache.
-- Reads Codex usage from the newest local `~/.codex/sessions` `rate_limits` snapshot.
-- Works on a phone or tablet connected to the same Wi-Fi network.
-- Tap the dashboard to refresh and request fullscreen mode.
-- Turns red when usage reaches the alert threshold.
-- Uses only Node.js built-in modules. No npm dependencies.
-- Includes helper scripts for Windows and macOS.
-- Includes a server-rendered KOBO / e-ink page for older browsers.
-
-## Important Limitations
-
-Usage numbers only update after you actually use Claude Code or Codex.
-
-Claude Code usage comes from `statusLine`, so opening Claude in the web app or desktop app will not update this dashboard. Codex usage is read from local Codex session files, so it updates only after Codex writes new session data.
-
-This project is not affiliated with Anthropic or OpenAI. It does not include official logos. Make sure your own use of third-party names, trademarks, and local tool output formats follows the relevant terms.
-
-This is a personal side project. Support is best-effort.
-
-## Requirements
-
-- Windows 10/11 or macOS
-- Node.js 18 or newer
-- Claude Code, with `statusLine` configured for real Claude usage
-- Codex, with local `~/.codex/sessions` data
-
-Check Node.js:
-
-```bash
-node -v
-```
-
-## Quick Start
-
-Clone the repository:
+Install Node.js 18 or newer, then run:
 
 ```bash
 git clone https://github.com/frankchiu-dev/claude-codex-usage-dashboard.git
 cd claude-codex-usage-dashboard
-```
-
-Start the dashboard:
-
-```bash
 node server.js
 ```
 
-You should see output similar to:
+Open **http://127.0.0.1:8787**. No npm install is required. Windows users can double-click `start-dashboard.bat`; macOS users can run `bash start-dashboard.sh` or the executable `start-dashboard.command`.
 
-```text
-Local:  http://localhost:8787
-Device: http://192.168.1.23:8787
-```
+You can use Claude Code, Codex, or both. Missing data shows setup guidance; it is never treated as zero usage. This unofficial project is not affiliated with Anthropic or OpenAI.
 
-Open `http://localhost:8787` on the computer running the server. To use a phone or tablet, connect it to the same Wi-Fi network and open the `Device` URL.
+## View on a phone or tablet
 
-## KOBO / E-ink Mode
-
-Many KOBO browsers are old and do not reliably support modern JavaScript features such as `fetch`, `async/await`, wake lock, or modern CSS. If the normal dashboard loads but the numbers never appear, use the KOBO page instead:
-
-Shortest URL for remaining percentage:
-
-```text
-http://YOUR-LAN-IP:8787/k
-```
-
-Shortest URL for used percentage:
-
-```text
-http://YOUR-LAN-IP:8787/u
-```
-
-These short URLs are useful on e-ink devices where typing is slow and copy/paste may not work.
-
-Long remaining URL:
-
-```text
-http://YOUR-LAN-IP:8787/kobo
-```
-
-`/eink`, `/e`, `/r`, `/kr`, and `/ku` are also available as aliases. In short: `/k` = remaining, `/u` = used.
-
-The KOBO page is rendered on the server, so the numbers are already inside the HTML. It does not require JavaScript. It refreshes with a simple `<meta refresh>` tag.
-
-Display remaining percentage:
-
-```text
-http://YOUR-LAN-IP:8787/kobo?mode=remaining
-```
-
-Display used percentage:
-
-```text
-http://YOUR-LAN-IP:8787/kobo?mode=used
-```
-
-KOBO browsers also may not rotate web pages reliably. The `/kobo` page is designed for portrait reading mode instead of relying on landscape rotation.
-
-## Start Scripts
-
-### Windows
-
-```powershell
-.\start-dashboard.bat
-```
-
-### macOS
+1. Connect the computer and phone to the same trusted Wi-Fi network.
+2. Stop the dashboard with Ctrl+C and start LAN mode:
 
 ```bash
-chmod +x ./start-dashboard.sh ./start-dashboard.command
-./start-dashboard.sh
+node server.js --lan
 ```
 
-You can also double-click `start-dashboard.command` in Finder after making it executable.
+3. Open the **Pair** link printed in the computer's terminal.
+4. Choose **Connect a device** and scan the QR code for your Wi-Fi/Ethernet address.
 
-## Configure Claude Code Usage
+The QR code is generated locally. Scanning it pairs the browser and opens the dashboard. Network mode requires pairing for the overview, usage API, history, and KOBO pages. Keep the QR code and pairing link private: they grant access to your usage. With the default temporary key, restarting signs devices out. An optional persistent key is described below.
 
-This step lets the dashboard show real Claude Code usage.
+If multiple network adapters are listed, choose the address belonging to the Wi-Fi or Ethernet connection shared with your phone. Guest Wi-Fi, client isolation, a VPN, or the computer's firewall may prevent a connection. Any firewall permission should be limited to your trusted private network.
 
-### Windows
+The source computer must stay awake and the dashboard must keep running. LAN sharing uses HTTP; pairing does not encrypt Wi-Fi traffic. Use the optional HTTPS remote-access methods for untrusted networks.
+
+## Where the numbers come from
+
+- **Claude Code:** a local status-line cache, normally `~/.claude/usage-cache.json`.
+- **Codex:** the newest normal Codex quota snapshot in local `~/.codex/sessions` logs.
+
+Opening this page does not query a model, call a usage API, or renew credentials. Numbers change when Claude Code or Codex updates the corresponding local records. Claude web/desktop activity alone does not refresh the local Claude status-line cache.
+
+Codex windows are identified by their actual duration. If the account reports only a weekly window, the five-hour field stays unavailable. Data older than two hours is labelled old; an unavailable window remains `--`.
+
+### Configure Claude Code
+
+Windows:
 
 ```powershell
 .\setup-claude-statusline.bat
 ```
 
-### macOS
+macOS:
 
 ```bash
-chmod +x ./setup-claude-statusline.sh
-./setup-claude-statusline.sh
+bash setup-claude-statusline.sh
 ```
 
-Then:
+Restart Claude Code, send one message, then refresh the dashboard. Some Claude Code versions may not supply quota fields to their status line; if they are absent, this version leaves Claude usage unavailable instead of reading OAuth credentials.
 
-1. Fully quit Claude Code.
-2. Open Claude Code again.
-3. Send one message.
-4. Refresh the dashboard.
+### Keep an existing Claude-HUD or other status line
 
-The Claude card will start reading `~/.claude/usage-cache.json`.
-
-## If You Already Have a statusLine
-
-Claude Code supports one `statusLine.command` at a time. If you already use another statusLine script, such as a Stream Deck integration or a custom prompt status line, use fanout mode.
-
-Enable fanout mode **before replacing your existing statusLine**:
-
-### Windows
+Enable fanout before replacing your current status-line command:
 
 ```powershell
 .\setup-claude-statusline.bat --fanout
 ```
 
-### macOS
-
 ```bash
-./setup-claude-statusline.sh --fanout
+bash setup-claude-statusline.sh --fanout
 ```
 
-Setup saves the existing command verbatim to `config.json` as `extraStatuslineCommand` if no nonempty command is already configured. It preserves other config/settings fields, including statusLine padding, and backs up files before changing them. Re-running setup does not save the dashboard's own wrapper as the extra command. A normal (non-fanout) install also saves the previous command for a later switch to fanout.
+Setup backs up settings and preserves the previous command in `extraStatuslineCommand` without replacing an existing nonempty value. It preserves unrelated settings, including status-line padding. Repeated setup does not capture the dashboard's wrapper as the extra command.
 
-Fanout sends the same stdin JSON to both commands. The dashboard always runs to update `~/.claude/usage-cache.json`. A successful extra command with non-whitespace stdout owns the display: multiline layout, ANSI escapes, and trailing newlines are preserved. If it is missing, empty, exits unsuccessfully, or times out (15 seconds per child), the dashboard's default status line is shown. If the dashboard also fails, the display falls back to `Claude`. Commands run sequentially, so both timeouts can add up.
+Fanout forwards the same input to both commands. A successful extra command with non-whitespace output owns the display, preserving multiline layout, ANSI escapes, and trailing newlines. Missing, empty, failed, or timed-out output falls back to the dashboard's status line. Each command has a 15-second timeout and they run sequentially. If both fail, the display falls back to `Claude`.
 
-To configure a different command manually, edit `config.json` (do not overwrite an existing file with the example):
+For manual configuration, preserve your existing config and add the exact original command to `extraStatuslineCommand`, including its shell quoting. `EXTRA_STATUSLINE_COMMAND` takes precedence. Only configure commands you trust. If an older setup already replaced the original command, retrieve it from a `~/.claude/settings.json.bak-*` backup or run your HUD setup again before enabling fanout.
+
+## History and forecast
+
+Choose **History & forecast** to see weekly usage for 24 hours, 48 hours, 7 days, or 30 days. The collector checks local records once per minute and saves only distinct source observations. It stores timestamps, percentages, and reset times, without prompts, session names, tokens, or credentials.
+
+History starts when this version runs; it does not reconstruct earlier usage from old conversations. Default retention is 30 days. Set `HISTORY_DAYS=0` to disable recording, or 1–60 to choose retention. The default data directory is `~/.claude-codex-usage-dashboard`. Stop the dashboard before deleting `history.jsonl` to clear its history.
+
+The forecast supports Claude/Codex, recent 6/24/48-hour pace, and slower/current/faster scenarios. It uses distinct source timestamps from the current quota period. Resets, stale data, long missing intervals, or insufficient coverage pause the estimate. The daily allowance is remaining percentage points divided by time until reset. These are planning estimates, not official billing or guarantees of future capacity.
+
+## KOBO and e-ink
+
+After pairing in LAN/remote mode, open:
+
+- `/k` — remaining percentage.
+- `/u` — used percentage.
+- `/kobo?mode=remaining` or `/kobo?mode=used` — explicit alternatives.
+
+The server renders the numbers into HTML and uses meta refresh, so JavaScript is not required. Other aliases are `/eink`, `/e`, `/r`, `/kr`, and `/ku`. Older browsers must support cookies for paired access. Open the pairing link or use the pairing-key form on `/pair` first.
+
+## Optional remote access
+
+| Need | Option |
+| --- | --- |
+| On this computer | Default local mode |
+| Phone/tablet on the same Wi-Fi | Built-in LAN mode and QR pairing |
+| Private access away from home | Tailscale Serve |
+| Browser access through your own domain | Cloudflare Tunnel with Access |
+
+See [remote-access.md](docs/remote-access.md) for separate Tailscale and Cloudflare instructions. Remote access uses the same local dashboard and does not move usage collection to a cloud server. Computer sleep or shutdown stops collection and live viewing.
+
+## Configuration
+
+Optional: copy `config.example.json` to `config.json` if that file does not exist. Merge into existing settings rather than replacing them. Environment variables override config values; `--lan` overrides `HOST` for that run.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `HOST` | `127.0.0.1` | Local only; `0.0.0.0` enables paired LAN access |
+| `PORT` | `8787` | HTTP port |
+| `DISPLAY_MODE` | `used` | `used` or `remaining` |
+| `ALERT_PERCENT` | `85` | Used percentage at which numbers turn red |
+| `STALE_MINUTES` | `120` | Age after which source data is labelled old |
+| `HISTORY_DAYS` | `30` | Local retention, 0 to disable, maximum 60 days |
+| `DATA_DIR` | `~/.claude-codex-usage-dashboard` | Compact history storage |
+| `CODEX_LOOKBACK_DAYS` | `14` | Session folders scanned for quota snapshots |
+| `CLAUDE_USAGE_CACHE` | `~/.claude/usage-cache.json` | Claude cache; also set the same environment variable for the status-line command if changed |
+| `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex session folder |
+| `KOBO_REFRESH_SECONDS` | `60` | E-ink refresh interval, minimum 15 seconds |
+| `PUBLIC_URL` | empty | Exact HTTPS origin used by an optional reverse proxy; also enables pairing and secure cookies |
+| `PAIRING_KEY` | random on restart | Optional persistent secret: 24–128 ASCII letters, digits, underscores or hyphens |
+| `DASHBOARD_CONFIG` | repository `config.json` | Alternate dashboard config file |
+| `extraStatuslineCommand` | empty | Existing trusted status-line command |
+
+To create a persistent pairing key without contacting any service:
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(24).toString('hex'))"
+```
+
+Store it in the ignored `config.json`. To revoke paired browsers, change the key and restart. Pairing cookies expire after 30 days; pair again when needed. Keys and pairing links should not be shared in screenshots or public issues.
+
+Example config for paired Wi-Fi access:
 
 ```json
 {
-  "extraStatuslineCommand": "node \"/absolute/path/to/your-existing-statusline.js\""
+  "HOST": "0.0.0.0",
+  "DISPLAY_MODE": "remaining",
+  "HISTORY_DAYS": 30,
+  "extraStatuslineCommand": ""
 }
 ```
 
-Use the exact original Claude-HUD or other statusLine command, including its arguments and shell quoting. `EXTRA_STATUSLINE_COMMAND` takes precedence over the config value. Only configure trusted commands; they run through your shell.
+### Start on login
 
-If an older installation already replaced your HUD command, setup cannot reconstruct it automatically. Retrieve it from a `~/.claude/settings.json.bak-*` backup or run your HUD's setup again, then enable fanout. Do not point `extraStatuslineCommand` at either dashboard statusline script.
+On Windows, run `install-autostart.bat`; remove with `uninstall-autostart.bat`. On macOS, run `bash install-autostart-macos.sh`; remove with `bash uninstall-autostart-macos.sh`.
 
-## Regression Tests
+Autostart uses `config.json`, so configure `HOST` and a persistent `PAIRING_KEY` there if you want paired devices to survive a restart. Temporary shell environment variables are not saved by the installer. macOS logs are in `~/Library/Logs/claude-codex-usage-dashboard.log` and `.err.log`; startup logs can contain the private pairing link.
 
-With Node.js 18 or newer, run:
+## Upgrading from 0.4.x
 
-```bash
-npm test
-```
+The default now binds to localhost. For existing Wi-Fi displays, enable `--lan` or set `HOST` in config, then pair each browser once. Existing status-line and fanout settings are preserved. Cloudflare and Tailscale deployments need their exact HTTPS origin in `PUBLIC_URL`.
 
-The tests use Node's built-in test runner and isolated temporary homes/configs. They exercise real child processes and verify usage-cache updates, verbatim multiline/ANSI output, fallback behavior, environment precedence, and setup preservation/backups. The timeout case takes about 15 seconds. These automated tests do not replace an end-to-end check in Claude Code with Claude-HUD on macOS or Windows.
+## Tests and privacy
 
-## Start Automatically on Login
+Run `npm test` or `node --test`. Tests cover quota-window interpretation, cache/session inputs, history, forecast, real local/LAN HTTP servers, pairing boundaries, and status-line preservation. The status-line timeout regression takes about 15 seconds. Windows automated checks do not replace a real-device macOS, KOBO, or phone check.
 
-### Windows
+The server makes no outbound network requests. Browser assets and QR generation are local. The repository README badges above are external images viewed on GitHub. The QR generator is vendored under its MIT license in [vendor](vendor/README.md); runtime uses Node built-ins and requires no installed npm dependencies.
 
-Install autostart:
-
-```powershell
-.\install-autostart.bat
-```
-
-Remove autostart:
-
-```powershell
-.\uninstall-autostart.bat
-```
-
-### macOS
-
-Install a LaunchAgent:
-
-```bash
-chmod +x ./install-autostart-macos.sh ./uninstall-autostart-macos.sh
-./install-autostart-macos.sh
-```
-
-Remove the LaunchAgent:
-
-```bash
-./uninstall-autostart-macos.sh
-```
-
-The macOS LaunchAgent writes logs to:
-
-```text
-~/Library/Logs/claude-codex-usage-dashboard.log
-~/Library/Logs/claude-codex-usage-dashboard.err.log
-```
-
-## Environment Variables
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `PORT` | `8787` | Dashboard port |
-| `HOST` | `0.0.0.0` | Allows devices on the same Wi-Fi to connect. Use `127.0.0.1` for local-only preview |
-| `ALERT_PERCENT` | `85` | Usage percentage that turns the dashboard red |
-| `DISPLAY_MODE` | `used` | Display `used` percentage or `remaining` percentage |
-| `KOBO_REFRESH_SECONDS` | `60` | Refresh interval for `/kobo`; minimum rendered value is 15 seconds |
-| `CODEX_LOOKBACK_DAYS` | `14` | How many days of Codex sessions to scan |
-| `CLAUDE_USAGE_CACHE` | `~/.claude/usage-cache.json` | Claude usage cache path |
-| `CODEX_SESSIONS_DIR` | `~/.codex/sessions` | Codex sessions path |
-| `EXTRA_STATUSLINE_COMMAND` | empty | Extra command for fanout mode |
-
-Windows example:
-
-```powershell
-$env:PORT="8790"
-$env:HOST="127.0.0.1"
-$env:DISPLAY_MODE="remaining"
-$env:KOBO_REFRESH_SECONDS="120"
-node server.js
-```
-
-macOS example:
-
-```bash
-PORT=8790 HOST=127.0.0.1 DISPLAY_MODE=remaining KOBO_REFRESH_SECONDS=120 node server.js
-```
-
-`DISPLAY_MODE=used` shows how much of the limit has been used. `DISPLAY_MODE=remaining` shows how much is left. The red alert color is still based on used percentage reaching `ALERT_PERCENT`.
-
-## Network Access
-
-If another device cannot connect, make sure it is on the same Wi-Fi network as the computer running the dashboard.
-
-### Windows Firewall
-
-```powershell
-netsh advfirewall firewall add rule name="AIUsageDashboard" dir=in action=allow protocol=TCP localport=8787
-```
-
-### macOS Firewall
-
-macOS may ask whether Node.js can accept incoming network connections. Allow it if you want to open the dashboard from a phone or tablet.
-
-## Privacy
-
-Data stays on your machine. The server reads local Claude and Codex usage records, but does not upload them anywhere.
-
-Do not commit:
-
-- `~/.claude/usage-cache.json`
-- `~/.codex/sessions`
-- `~/.claude/settings.json`
-- `config.json`
-
-## Uploading to GitHub
-
-See [GITHUB_UPLOAD_GUIDE.md](GITHUB_UPLOAD_GUIDE.md) for a first-time step-by-step guide.
+Keep `config.json`, history, local provider files, session logs, OAuth credentials, and pairing links out of Git. See [SECURITY.md](SECURITY.md). Personal Cloudflare settings, StreamDock integration, Windows service paths, and provider credential renewal are not required by this portable edition.
 
 ## License
 
-MIT
+MIT. QR Code is a registered trademark of DENSO WAVE INCORPORATED. Third-party names identify the data sources; no official logos are included.

@@ -1,10 +1,11 @@
 {
   "name": "claude-codex-usage-dashboard",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "A local Windows and macOS dashboard for Claude Code and Codex usage limits.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
+    "start:lan": "node server.js --lan",
     "setup:claude": "node setup-statusline.js",
     "setup:claude:fanout": "node setup-statusline.js --fanout",
     "test": "node --test"

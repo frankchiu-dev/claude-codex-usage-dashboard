@@ -19,3 +19,6 @@ Thumbs.db
 
 usage-cache.json
 streamdeck-usage.json
+.codex_tmp/
+data/
+history.jsonl

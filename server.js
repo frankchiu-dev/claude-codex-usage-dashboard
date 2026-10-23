@@ -5,154 +5,28 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-const HOST = process.env.HOST || '0.0.0.0';
-
-function envNumber(name, fallback) {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) ? value : fallback;
+const { loadSettings } = require('./lib/settings');
+const { createUsageReader } = require('./lib/usage');
+const { createHistory } = require('./lib/history');
+const { createAccess } = require('./lib/access');
+const { connectPage, pairingPage } = require('./lib/pages');
+if (process.argv.includes('--help')) {
+  console.log('Usage: node server.js [--lan]\nDefault: this computer only. --lan: paired access on the same Wi-Fi.\nSee README.md for configuration and optional remote access.');
+  process.exit(0);
 }
-
-const PORT = envNumber('PORT', 8787);
-const ALERT_PERCENT = envNumber('ALERT_PERCENT', 85);
-const CODEX_LOOKBACK_DAYS = envNumber('CODEX_LOOKBACK_DAYS', 14);
-const KOBO_REFRESH_SECONDS = envNumber('KOBO_REFRESH_SECONDS', 60);
-const DISPLAY_MODE = ['used', 'remaining'].includes(String(process.env.DISPLAY_MODE || '').toLowerCase())
-  ? String(process.env.DISPLAY_MODE).toLowerCase()
-  : 'used';
-
-const CLAUDE_CACHE = process.env.CLAUDE_USAGE_CACHE
-  || path.join(os.homedir(), '.claude', 'usage-cache.json');
-const CODEX_SESSIONS = process.env.CODEX_SESSIONS_DIR
-  || path.join(os.homedir(), '.codex', 'sessions');
-
-function readJson(filePath) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch (error) {
-    return null;
-  }
+const settings = loadSettings();
+const HOST = settings.host, PORT = settings.port;
+const ALERT_PERCENT = settings.alertPercent, DISPLAY_MODE = settings.displayMode;
+const KOBO_REFRESH_SECONDS = settings.koboRefreshSeconds;
+const readUsage = createUsageReader(settings);
+const history = createHistory(settings);
+const access = createAccess(settings);
+function readClaudeUsage() { return readUsage().claude; }
+function getCodexUsage() { return readUsage().codex; }
+function lanAddresses() {
+  return [...new Set(Object.values(os.networkInterfaces()).flat().filter(n => n && n.family === 'IPv4' && !n.internal && !n.address.startsWith('169.254.')).map(n => n.address))];
 }
-
-function normalizeClaudeWindow(windowData) {
-  if (!windowData || typeof windowData.used_percentage !== 'number') return null;
-  return {
-    used: windowData.used_percentage,
-    resetAt: windowData.resets_at ? windowData.resets_at * 1000 : null,
-  };
-}
-
-function normalizeCodexWindow(windowData) {
-  if (!windowData || typeof windowData.used_percent !== 'number') return null;
-  return {
-    used: windowData.used_percent,
-    resetAt: windowData.resets_at ? windowData.resets_at * 1000 : null,
-  };
-}
-
-function readClaudeUsage() {
-  const data = readJson(CLAUDE_CACHE);
-  if (!data || !data.rate_limits) {
-    return { fetchedAt: null, five: null, seven: null };
-  }
-
-  return {
-    fetchedAt: data.fetchedAt || null,
-    five: normalizeClaudeWindow(data.rate_limits.five_hour),
-    seven: normalizeClaudeWindow(data.rate_limits.seven_day),
-  };
-}
-
-function getCodexDayDirectory(date) {
-  return path.join(
-    CODEX_SESSIONS,
-    String(date.getFullYear()),
-    String(date.getMonth() + 1).padStart(2, '0'),
-    String(date.getDate()).padStart(2, '0'),
-  );
-}
-
-function readCodexUsage() {
-  if (!fs.existsSync(CODEX_SESSIONS)) {
-    return { fetchedAt: null, five: null, seven: null };
-  }
-
-  const now = new Date();
-  let newest = null;
-
-  for (let dayOffset = 0; dayOffset < CODEX_LOOKBACK_DAYS; dayOffset += 1) {
-    const day = new Date(now.getTime() - dayOffset * 86400000);
-    const dir = getCodexDayDirectory(day);
-    if (!fs.existsSync(dir)) continue;
-
-    let files = [];
-    try {
-      files = fs.readdirSync(dir)
-        .filter((fileName) => fileName.startsWith('rollout-') && fileName.endsWith('.jsonl'));
-    } catch (error) {
-      continue;
-    }
-
-    for (const fileName of files) {
-      const filePath = path.join(dir, fileName);
-      let lines = [];
-      try {
-        lines = fs.readFileSync(filePath, 'utf8').split('\n');
-      } catch (error) {
-        continue;
-      }
-
-      for (const line of lines) {
-        if (!line || !line.includes('token_count')) continue;
-
-        let event = null;
-        try {
-          event = JSON.parse(line);
-        } catch (error) {
-          continue;
-        }
-
-        const payload = event && event.payload;
-        if (!payload || payload.type !== 'token_count' || !payload.rate_limits) continue;
-
-        const timestamp = Date.parse(event.timestamp || 0);
-        if (!timestamp) continue;
-
-        if (!newest || timestamp > newest.timestamp) {
-          newest = { timestamp, rateLimits: payload.rate_limits };
-        }
-      }
-    }
-  }
-
-  if (!newest) {
-    return { fetchedAt: null, five: null, seven: null };
-  }
-
-  return {
-    fetchedAt: newest.timestamp,
-    five: normalizeCodexWindow(newest.rateLimits.primary),
-    seven: normalizeCodexWindow(newest.rateLimits.secondary),
-  };
-}
-
-let codexCache = { fetchedAt: 0, data: null };
-
-function getCodexUsage() {
-  const now = Date.now();
-  if (codexCache.data && now - codexCache.fetchedAt < 8000) {
-    return codexCache.data;
-  }
-
-  let data = null;
-  try {
-    data = readCodexUsage();
-  } catch (error) {
-    data = { fetchedAt: null, five: null, seven: null };
-  }
-
-  codexCache = { fetchedAt: now, data };
-  return data;
-}
+for (const host of lanAddresses()) access.allowHost(host);
 
 function getLanAddress() {
   const networks = os.networkInterfaces();
@@ -415,13 +289,10 @@ function pageHtml() {
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#EBE6D9">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@600;800&display=swap" rel="stylesheet">
 <title>Claude / Codex Usage Dashboard</title>
 <style>
 :root {
@@ -453,7 +324,7 @@ body {
   display: flex;
   gap: clamp(16px, 4vw, 48px);
   padding: 7vh calc(env(safe-area-inset-right) + 4.5vw) calc(env(safe-area-inset-bottom) + 2.4vh) calc(env(safe-area-inset-left) + 4.5vw);
-  overflow: hidden;
+  overflow: auto;
 }
 .card {
   min-width: 0;
@@ -572,14 +443,17 @@ body {
     min-height: 360px;
   }
 }
+.page-nav{position:absolute;top:12px;left:4.5vw;display:flex;gap:24px;font:15px system-ui}.page-nav a{color:#4c57a0}.hint{font:14px/1.5 system-ui;color:#8b472f;margin-top:10px;max-width:45ch}.age{white-space:normal;font-size:clamp(14px,2.3vmin,24px)}@media(max-width:720px){body{padding-top:58px}.page-nav{top:16px}}
 </style>
 </head>
 <body>
+  <nav class="page-nav"><a href="/details">History &amp; forecast</a><a href="/connect">Connect a device</a></nav>
   <section class="card" aria-label="Claude usage">
     <div class="head">
       <div class="brand claude">Claude</div>
       <div class="age" id="age_claude">No data</div>
     </div>
+    <p class="hint" id="hint_claude" role="status"></p>
     <div class="mode">${DISPLAY_MODE === 'remaining' ? 'Remaining' : 'Used'}</div>
     <div class="metrics">
       <div class="metric">
@@ -605,6 +479,7 @@ body {
       <div class="brand codex">Codex</div>
       <div class="age" id="age_codex">No data</div>
     </div>
+    <p class="hint" id="hint_codex" role="status"></p>
     <div class="mode">${DISPLAY_MODE === 'remaining' ? 'Remaining' : 'Used'}</div>
     <div class="metrics">
       <div class="metric">
@@ -688,6 +563,8 @@ function setMetric(prefix, data, baseColor) {
 async function refreshUsage() {
   try {
     const response = await fetch('/api/usage', { cache: 'no-store' });
+    if (response.status === 401) { location.href = '/pair'; return; }
+    if (!response.ok) throw new Error('Dashboard unavailable');
     const usage = await response.json();
     const claude = usage.claude || {};
     const codex = usage.codex || {};
@@ -698,6 +575,10 @@ async function refreshUsage() {
     setMetric('codex_seven', codex.seven, COLORS.codex);
     $('age_claude').textContent = ageText(claude.fetchedAt);
     $('age_codex').textContent = ageText(codex.fetchedAt);
+    for (const provider of ['claude', 'codex']) {
+      const source = usage[provider];
+      $('hint_' + provider).textContent = source.status === 'stale' ? 'Data is old. Use ' + (provider === 'claude' ? 'Claude Code' : 'Codex') + ' to update its local records.' : source.status === 'missing' ? (provider === 'claude' ? 'Configure the Claude Code status line, then send a message. You can also use this dashboard with Codex alone.' : 'Use Codex on this computer to create usage records. You can also use this dashboard with Claude alone.') : '';
+    }
   } catch (error) {
     $('age_claude').textContent = 'Offline';
     $('age_codex').textContent = 'Offline';
@@ -722,13 +603,15 @@ document.addEventListener('visibilitychange', () => {
   }
 });
 
-document.body.addEventListener('click', () => {
+document.body.addEventListener('click', event => {
+  if (event.target.closest('a,button,input,select')) return;
   refreshUsage();
   requestWakeLock();
   const page = document.documentElement;
   if (page.requestFullscreen && !document.fullscreenElement) {
     try {
-      page.requestFullscreen();
+      const pending = page.requestFullscreen();
+      if (pending && pending.catch) pending.catch(() => {});
     } catch (error) {}
   }
 });
@@ -737,42 +620,76 @@ document.body.addEventListener('click', () => {
 </html>`;
 }
 
+const assets = new Map([
+  ['/details', ['details.html', 'text/html; charset=utf-8']],
+  ['/details.js', ['details.js', 'text/javascript; charset=utf-8']],
+  ['/forecast.js', ['forecast.js', 'text/javascript; charset=utf-8']],
+]);
+function send(response, status, body, type = 'text/html; charset=utf-8') {
+  response.writeHead(status, { 'Content-Type': type }); response.end(body);
+}
 const server = http.createServer((request, response) => {
-  const requestPath = request.url ? request.url.split('?')[0] : '/';
-
-  if (isKoboPath(requestPath)) {
-    response.writeHead(200, {
-      'Content-Type': 'text/html; charset=utf-8',
-      'Cache-Control': 'no-store',
-    });
-    response.end(koboPageHtml(request.url));
+  response.setHeader('Cache-Control', 'no-store');
+  response.setHeader('Referrer-Policy', 'no-referrer');
+  response.setHeader('X-Content-Type-Options', 'nosniff');
+  response.setHeader('X-Frame-Options', 'DENY');
+  if (!access.hostAllowed(request)) { send(response, 403, 'Host is not configured. Set PUBLIC_URL for a remote HTTPS origin.', 'text/plain'); return; }
+  let url;
+  try { url = new URL(request.url, 'http://localhost'); } catch { send(response, 400, 'Bad request', 'text/plain'); return; }
+  const route = url.pathname;
+  if (!['GET', 'HEAD', 'POST'].includes(request.method)) { send(response, 405, 'Method not allowed', 'text/plain'); return; }
+  if (request.method === 'POST' && request.headers.origin) {
+    let same = false;
+    try { same = new URL(request.headers.origin).host === request.headers.host; } catch {}
+    if (!same) { send(response, 403, 'Cross-origin request rejected', 'text/plain'); return; }
+  }
+  if (route === '/healthz' && request.method === 'GET') { send(response, 200, '{"ok":true}', 'application/json'); return; }
+  if (route === '/pair') {
+    const pair = value => {
+      if (!access.pair(value)) { send(response, 401, pairingPage(Boolean(value))); return; }
+      response.writeHead(303, { 'Set-Cookie': access.cookie(), Location: '/' }); response.end();
+    };
+    if (request.method === 'POST') {
+      let body = '';
+      request.on('data', chunk => { body += chunk; if (body.length > 1024) request.destroy(); });
+      request.on('end', () => pair(new URLSearchParams(body).get('key')));
+    } else if (url.searchParams.has('key')) pair(url.searchParams.get('key'));
+    else send(response, 200, pairingPage());
     return;
   }
-
-  if (request.url === '/api/usage') {
-    response.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'no-store',
-    });
-    response.end(JSON.stringify({
-      displayMode: DISPLAY_MODE,
-      claude: readClaudeUsage(),
-      codex: getCodexUsage(),
-    }));
+  if (!access.authorized(request)) {
+    if (route.startsWith('/api/')) send(response, 401, '{"error":"pairing_required"}', 'application/json');
+    else send(response, 401, pairingPage());
     return;
   }
-
-  response.writeHead(200, {
-    'Content-Type': 'text/html; charset=utf-8',
-    'Cache-Control': 'no-store',
-  });
-  response.end(pageHtml());
+  if (request.method === 'POST') { send(response, 405, 'Method not allowed', 'text/plain'); return; }
+  if (route === '/api/usage') { send(response, 200, JSON.stringify(readUsage()), 'application/json'); return; }
+  if (route === '/api/dashboard') {
+    const hours = Number(url.searchParams.get('hours')) || 48;
+    send(response, 200, JSON.stringify({ usage: readUsage(), history: history.snapshot(hours) }), 'application/json'); return;
+  }
+  if (route === '/connect') { send(response, 200, connectPage(settings, server.address().port, HOST === '0.0.0.0' || settings.loopback ? lanAddresses() : [HOST], access.key)); return; }
+  if (isKoboPath(route)) { send(response, 200, koboPageHtml(request.url)); return; }
+  if (assets.has(route)) {
+    const [file, type] = assets.get(route); send(response, 200, fs.readFileSync(path.join(__dirname, 'public', file)), type); return;
+  }
+  if (route === '/') { send(response, 200, pageHtml()); return; }
+  if (route === '/favicon.ico') { response.writeHead(204); response.end(); return; }
+  send(response, 404, 'Page not found', 'text/plain');
 });
-
+server.on('error', error => { console.error('Dashboard could not start: ' + error.message); process.exitCode = 1; });
 server.listen(PORT, HOST, () => {
-  const visibleHost = HOST === '0.0.0.0' ? getLanAddress() : HOST;
+  const port = server.address().port;
+  const localHost = HOST === '::1' ? '[::1]' : (HOST === '0.0.0.0' || settings.loopback ? '127.0.0.1' : HOST);
+  const local = 'http://' + localHost + ':' + port;
   console.log('Claude / Codex usage dashboard');
-  console.log('Local:  http://localhost:' + PORT);
-  console.log('Device: http://' + visibleHost + ':' + PORT);
-  console.log('KOBO:   http://' + visibleHost + ':' + PORT + '/k');
+  console.log('Mode: ' + (settings.authRequired ? 'paired access' : 'local only'));
+  console.log('Local: ' + local);
+  if (settings.authRequired) {
+    console.log('Pair: ' + (settings.publicUrl || local) + '/pair?key=' + encodeURIComponent(access.key));
+    console.log('Open the pairing link above, then choose Connect a device for a QR code. Keep this link private.');
+  } else console.log('Phone/tablet: restart with node server.js --lan, then choose Connect a device.');
+  console.log('KOBO: ' + (settings.publicUrl || local) + '/k');
+  history.record(readUsage());
+  setInterval(() => history.record(readUsage()), 60000).unref();
 });

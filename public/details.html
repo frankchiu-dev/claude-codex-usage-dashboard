@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Usage history &amp; forecast</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#ebe6d9;color:#2b2a26;font:17px/1.6 system-ui,sans-serif}main{max-width:1100px;margin:auto;padding:24px}nav{display:flex;gap:24px;flex-wrap:wrap}a{color:#4c57a0}section{background:#fff;padding:24px;margin:20px 0;border-radius:12px}h1{font-size:clamp(24px,5vw,38px)}h2{margin-top:0}label{display:inline-flex;flex-direction:column;margin:0 20px 12px 0}select,button{font:inherit;padding:8px;min-height:44px}#chart{display:block;width:100%;height:auto;min-height:180px}.muted{color:#68655e}#forecast{font-size:24px;font-weight:650}#status{min-height:1.6em}p{overflow-wrap:anywhere}.legend{display:flex;gap:20px}.legend span:before{content:'';display:inline-block;width:14px;height:4px;margin-right:6px;vertical-align:middle}.claude:before{background:#be7457}.codex:before{background:#767fc6}@media(max-width:480px){main{padding:16px}section{padding:16px}}
+</style>
+<script src="/forecast.js" defer></script><script src="/details.js" defer></script>
+</head>
+<body><main>
+<nav><a href="/">← Overview</a><a href="/connect">Connect a device</a></nav>
+<h1>Usage history &amp; forecast</h1>
+<p class="muted">Local observations of weekly used percentage. Keeping this page open does not query a model or refresh provider credentials.</p>
+<label>History range<select id="range"><option value="24">24 hours</option><option value="48" selected>48 hours</option><option value="168">7 days</option><option value="720">30 days</option></select></label>
+<p id="status" role="status">Loading observations…</p>
+<section aria-label="Weekly usage history"><div class="legend"><span class="claude">Claude</span><span class="codex">Codex</span></div><svg id="chart" viewBox="0 0 960 320" role="img" aria-label="Weekly usage over time"></svg><p id="chart-note" class="muted"></p></section>
+<section><h2>Will the weekly limit last?</h2>
+<label>Provider<select id="provider"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+<label>Recent pace<select id="window"><option value="6">6 hours</option><option value="24" selected>24 hours</option><option value="48">48 hours</option></select></label>
+<label>Scenario<select id="pace"><option value="0.5">50% slower</option><option value="1" selected>Current pace</option><option value="1.5">50% faster</option></select></label>
+<p id="forecast" role="status">Collecting observations…</p><p id="forecast-detail"></p><p id="budget"></p>
+<p class="muted">An estimate from elapsed time and observed percentage changes, including idle periods. It is not a provider guarantee. Resets start a new period; stale or insufficient observations pause the estimate.</p>
+</section></main></body></html>

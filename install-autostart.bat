@@ -8,5 +8,6 @@ echo Installed: AIUsageDashboard.lnk
 echo Starting once in the background...
 start "" wscript.exe "%~dp0run-hidden.vbs"
 echo.
-echo Open http://YOUR-LAN-IP:8787 from a phone or tablet on the same Wi-Fi.
+echo Open http://127.0.0.1:8787 on this computer.
+echo For phone access, configure HOST and PAIRING_KEY in config.json first. See README.md.
 pause
