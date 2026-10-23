@@ -43,10 +43,14 @@ process.stdin.on('end', () => {
 
   const own = runCommand(process.execPath, [OUR_STATUSLINE], input);
 
-  if (extraCommand.trim()) {
-    runCommand(extraCommand, [], input, { shell: true });
-  }
+  const extra = typeof extraCommand === 'string' && extraCommand.trim()
+    ? runCommand(extraCommand, [], input, { shell: true })
+    : null;
 
-  const output = own && own.stdout ? own.stdout.trim() : 'Claude';
+  // Use trim only to detect empty output; preserve HUD layout and ANSI escapes.
+  const hasOutput = (result) => result && !result.error && result.status === 0
+    && typeof result.stdout === 'string' && result.stdout.trim();
+  const output = hasOutput(extra) ? extra.stdout
+    : hasOutput(own) ? own.stdout : 'Claude';
   process.stdout.write(output);
 });
