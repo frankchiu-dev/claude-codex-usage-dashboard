@@ -157,39 +157,7 @@ The Claude card will start reading `~/.claude/usage-cache.json`.
 
 Claude Code supports one `statusLine.command` at a time. If you already use another statusLine script, such as a Stream Deck integration or a custom prompt status line, use fanout mode.
 
-Copy the example config:
-
-### Windows
-
-```powershell
-Copy-Item .\config.example.json .\config.json
-```
-
-### macOS
-
-```bash
-cp ./config.example.json ./config.json
-```
-
-Edit `config.json`.
-
-Windows example:
-
-```json
-{
-  "extraStatuslineCommand": "powershell -NoProfile -ExecutionPolicy Bypass -File \"%USERPROFILE%\\.claude\\your-existing-statusline.ps1\""
-}
-```
-
-macOS example:
-
-```json
-{
-  "extraStatuslineCommand": "/Users/YOUR_NAME/.claude/your-existing-statusline.sh"
-}
-```
-
-Then enable fanout mode.
+Enable fanout mode **before replacing your existing statusLine**:
 
 ### Windows
 
@@ -203,7 +171,31 @@ Then enable fanout mode.
 ./setup-claude-statusline.sh --fanout
 ```
 
-This sends the same Claude Code statusLine JSON to both this dashboard and your existing command.
+Setup saves the existing command verbatim to `config.json` as `extraStatuslineCommand` if no nonempty command is already configured. It preserves other config/settings fields, including statusLine padding, and backs up files before changing them. Re-running setup does not save the dashboard's own wrapper as the extra command. A normal (non-fanout) install also saves the previous command for a later switch to fanout.
+
+Fanout sends the same stdin JSON to both commands. The dashboard always runs to update `~/.claude/usage-cache.json`. A successful extra command with non-whitespace stdout owns the display: multiline layout, ANSI escapes, and trailing newlines are preserved. If it is missing, empty, exits unsuccessfully, or times out (15 seconds per child), the dashboard's default status line is shown. If the dashboard also fails, the display falls back to `Claude`. Commands run sequentially, so both timeouts can add up.
+
+To configure a different command manually, edit `config.json` (do not overwrite an existing file with the example):
+
+```json
+{
+  "extraStatuslineCommand": "node \"/absolute/path/to/your-existing-statusline.js\""
+}
+```
+
+Use the exact original Claude-HUD or other statusLine command, including its arguments and shell quoting. `EXTRA_STATUSLINE_COMMAND` takes precedence over the config value. Only configure trusted commands; they run through your shell.
+
+If an older installation already replaced your HUD command, setup cannot reconstruct it automatically. Retrieve it from a `~/.claude/settings.json.bak-*` backup or run your HUD's setup again, then enable fanout. Do not point `extraStatuslineCommand` at either dashboard statusline script.
+
+## Regression Tests
+
+With Node.js 18 or newer, run:
+
+```bash
+npm test
+```
+
+The tests use Node's built-in test runner and isolated temporary homes/configs. They exercise real child processes and verify usage-cache updates, verbatim multiline/ANSI output, fallback behavior, environment precedence, and setup preservation/backups. The timeout case takes about 15 seconds. These automated tests do not replace an end-to-end check in Claude Code with Claude-HUD on macOS or Windows.
 
 ## Start Automatically on Login
 
